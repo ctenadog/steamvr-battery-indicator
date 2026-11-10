@@ -31,6 +31,7 @@
 #endif
 
 #include "openvr_capi.h"
+#include "log.h"
 
 // ---------------------------------------------------------------------------
 // Dynamic loading of the OpenVR runtime
@@ -78,39 +79,136 @@ std::string executableDir() {
     return slash == std::string::npos ? std::string(".") : p.substr(0, slash);
 }
 
+#ifdef _WIN32
+std::string regString(HKEY root, const char *sub, const char *value) {
+    HKEY key = nullptr;
+    if (RegOpenKeyExA(root, sub, 0, KEY_READ, &key) != ERROR_SUCCESS) return std::string();
+    char buf[2048];
+    DWORD size = sizeof(buf);
+    DWORD type = 0;
+    const LONG rc = RegQueryValueExA(key, value, nullptr, &type,
+                                     reinterpret_cast<LPBYTE>(buf), &size);
+    RegCloseKey(key);
+    if (rc != ERROR_SUCCESS || (type != REG_SZ && type != REG_EXPAND_SZ)) return std::string();
+    if (size > 0 && buf[size - 1] == '\0') --size;  // drop the trailing null
+    return std::string(buf, size);
+}
+
+std::string joinPath(const std::string &a, const std::string &b) {
+    if (a.empty()) return b;
+    if (a.back() == '\\' || a.back() == '/') return a + b;
+    return a + "\\" + b;
+}
+
+// Reads every "path" value from a Steam libraryfolders.vdf, so SteamVR is found
+// even when it lives in a secondary library on another drive.
+void collectLibraryPaths(const std::string &vdfPath, std::vector<std::string> &out) {
+    FILE *f = std::fopen(vdfPath.c_str(), "r");
+    if (!f) return;
+    char line[4096];
+    while (std::fgets(line, sizeof(line), f)) {
+        const char *p = std::strstr(line, "\"path\"");
+        if (!p) continue;
+        p = std::strchr(p + 6, '"');
+        if (!p) continue;
+        const char *q = std::strchr(p + 1, '"');
+        if (!q) continue;
+        std::string raw(p + 1, static_cast<size_t>(q - (p + 1)));
+        std::string path;
+        for (size_t i = 0; i < raw.size(); ++i) {
+            if (raw[i] == '\\' && i + 1 < raw.size() && raw[i + 1] == '\\') {
+                path += '\\';
+                ++i;
+            } else {
+                path += raw[i];
+            }
+        }
+        if (!path.empty()) out.push_back(path);
+    }
+    std::fclose(f);
+}
+
+std::vector<std::string> windowsRuntimeCandidates() {
+    const char *name = "openvr_api.dll";
+    std::vector<std::string> roots;
+    for (HKEY root : {HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE}) {
+        for (const char *sub : {"Software\\Valve\\Steam",
+                                "SOFTWARE\\WOW6432Node\\Valve\\Steam"}) {
+            std::string p = regString(root, sub, "InstallPath");
+            if (p.empty()) p = regString(root, sub, "SteamPath");
+            if (!p.empty()) roots.push_back(p);
+        }
+    }
+    roots.push_back("C:\\Program Files (x86)\\Steam");
+    roots.push_back("C:\\Program Files\\Steam");
+
+    std::vector<std::string> libs = roots;
+    for (const auto &r : roots) {
+        collectLibraryPaths(joinPath(joinPath(r, "steamapps"), "libraryfolders.vdf"), libs);
+    }
+
+    std::vector<std::string> out;
+    for (const auto &lib : libs) {
+        out.push_back(joinPath(lib, "steamapps\\common\\SteamVR\\bin\\win64\\" + std::string(name)));
+        out.push_back(joinPath(lib, "steamapps\\common\\SteamVR\\bin\\win32\\" + std::string(name)));
+    }
+
+    // SteamVR registers its own install path under the OpenVR key.
+    for (HKEY root : {HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE}) {
+        std::string rt = regString(root, "Software\\Valve\\OpenVR", "RuntimePath");
+        if (!rt.empty()) {
+            out.push_back(joinPath(rt, "bin\\win64\\" + std::string(name)));
+            out.push_back(joinPath(rt, "bin\\win32\\" + std::string(name)));
+        }
+    }
+    return out;
+}
+#endif
+
 std::vector<std::string> libraryCandidates() {
     const std::string dir = executableDir();
+    std::vector<std::string> out;
 #ifdef _WIN32
     const char *name = "openvr_api.dll";
-    const std::vector<std::string> extras = {
-        "C:\\Program Files (x86)\\Steam\\steamapps\\common\\SteamVR\\bin\\win64\\" + std::string(name),
-        "C:\\Program Files\\Steam\\steamapps\\common\\SteamVR\\bin\\win64\\" + std::string(name),
-    };
+    out.push_back(dir + "\\" + name);
+    out.push_back(dir + "\\lib\\" + name);
+    if (const char *env = getenv("STEAMVR_OPENVR_PATH")) {
+        out.push_back(env);
+        out.push_back(std::string(env) + "\\" + name);
+    }
+    for (const auto &p : windowsRuntimeCandidates()) out.push_back(p);
+    out.push_back(name);  // let the system loader search its paths
 #else
     const char *name = "libopenvr_api.so";
+    const std::string home = getenv("HOME") ? getenv("HOME") : "";
     const std::vector<std::string> extras = {
-        std::string(getenv("HOME") ? getenv("HOME") : "") +
-            "/.steam/steam/steamapps/common/SteamVR/bin/linux64/" + name,
-        std::string(getenv("HOME") ? getenv("HOME") : "") +
-            "/.local/share/Steam/steamapps/common/SteamVR/bin/linux64/" + name,
-        std::string(getenv("HOME") ? getenv("HOME") : "") +
-            "/.steam/root/steamapps/common/SteamVR/bin/linux64/" + name,
+        home + "/.steam/steam/steamapps/common/SteamVR/bin/linux64/" + name,
+        home + "/.local/share/Steam/steamapps/common/SteamVR/bin/linux64/" + name,
+        home + "/.steam/root/steamapps/common/SteamVR/bin/linux64/" + name,
+        home + "/.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/"
+               "common/SteamVR/bin/linux64/" + name,
     };
-#endif
-    std::vector<std::string> out;
     out.push_back(dir + "/" + name);
     out.push_back(dir + "/lib/" + name);
     if (const char *env = getenv("STEAMVR_OPENVR_PATH")) out.push_back(env);
     for (const auto &e : extras) out.push_back(e);
     out.push_back(name);  // let the system loader search its paths
+#endif
     return out;
 }
 
 bool loadRuntime() {
-    for (const auto &candidate : libraryCandidates()) {
+    const std::vector<std::string> candidates = libraryCandidates();
+    for (const auto &candidate : candidates) {
         g_lib = openLibrary(candidate);
-        if (g_lib) return true;
+        if (g_lib) {
+            logger::info("Loaded OpenVR runtime from: " + candidate);
+            return true;
+        }
     }
+    std::string tried;
+    for (const auto &c : candidates) tried += "\n    " + c;
+    logger::error("Could not load the OpenVR runtime library. Tried:" + tried);
     return false;
 }
 

@@ -92,12 +92,25 @@ g++ -std=c++17 -O2 -Isrc src/main.cpp -o steamvr_battery_indicator -ldl
 
 ## Если OpenVR не находится
 
-Программа ищет библиотеку OpenVR в стандартных местах Steam. Если SteamVR стоит
-нестандартно, укажите путь явно:
+Программа ищет библиотеку OpenVR сама:
+
+- рядом с самой программой;
+- на Windows — в реестре (`HKCU`/`HKLM\Software\Valve\Steam`, `...\Valve\OpenVR`)
+  и во всех библиотеках Steam (включая другие диски через `libraryfolders.vdf`);
+- на Linux — в стандартных папках Steam.
+
+Если SteamVR стоит нестандартно, укажите путь явно:
+
+```bat
+set STEAMVR_OPENVR_PATH=E:\Steam\steamapps\common\SteamVR\bin\win64
+dist\steamvr_battery_indicator.exe
+```
 
 ```bash
 STEAMVR_OPENVR_PATH=/path/to/libopenvr_api.so ./steamvr_battery_indicator
 ```
+
+Все проверенные пути пишутся в лог-файл, так что видно, где программа искала.
 
 ## Тесты
 
