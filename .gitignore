@@ -1,0 +1,6 @@
+# Build output
+steamvr_battery_indicator
+steamvr_battery_indicator.exe
+*.o
+*.png
+build/
