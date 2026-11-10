@@ -3,12 +3,18 @@
 
 #include <chrono>
 #include <cmath>
+#include <csignal>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
+#include <exception>
 #include <string>
 #include <thread>
 #include <vector>
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 #include "runtime.h"
 #include "image.h"
@@ -17,8 +23,10 @@
 
 namespace {
 
-constexpr const char *kOverlayKey = "openhands.hmd_battery";
-constexpr const char *kOverlayName = "HMD Battery";
+// Overlay keys must be writable: the OpenVR runtime is handed a char* and a
+// string literal would be undefined behaviour if it ever wrote to it.
+char kOverlayKey[] = "openhands.hmd_battery";
+char kOverlayName[] = "HMD Battery";
 
 struct Options {
     std::string source = "hmd";    // hmd | left | right
@@ -269,26 +277,34 @@ public:
 
     bool start(Runtime &rt) {
         rt_ = &rt;
-        EVROverlayError err = rt.overlay->CreateOverlay(
-            const_cast<char *>(kOverlayKey), const_cast<char *>(kOverlayName), &handle_);
+        if (!checkOverlayTable(rt.overlay)) return false;
+        logger::info("Creating overlay...");
+        EVROverlayError err = rt.overlay->CreateOverlay(kOverlayKey, kOverlayName, &handle_);
         if (err == EVROverlayError_VROverlayError_KeyInUse) {
-            err = rt.overlay->FindOverlay(const_cast<char *>(kOverlayKey), &handle_);
+            err = rt.overlay->FindOverlay(kOverlayKey, &handle_);
         }
         if (err != EVROverlayError_VROverlayError_None) {
+            logger::error(std::string("Could not create overlay: ") +
+                          rt.overlay->GetOverlayErrorNameFromEnum(err));
             std::fprintf(stderr, "Could not create overlay: %s\n",
                          rt.overlay->GetOverlayErrorNameFromEnum(err));
             return false;
         }
+        logger::info("Overlay created (handle set).");
         rt.overlay->SetOverlayWidthInMeters(handle_, opt_.width);
         rt.overlay->SetOverlaySortOrder(handle_, 50);
         rt.overlay->SetOverlayFlag(handle_, VROverlayFlags_VisibleInDashboard, true);
         // The texture is uploaded as non-premultiplied BGRA.
         rt.overlay->SetOverlayFlag(handle_, VROverlayFlags_IsPremultiplied, false);
 
+        logger::info("Attaching overlay to the anchor device...");
         syncAnchor();
         device_ = resolveSource(rt.system, opt_.source);
+        logger::info("Reading initial battery state...");
         reading_ = readBattery(rt.system, device_);
+        logger::info("Rendering the first frame...");
         upload(0.0f);
+        logger::info("First frame uploaded.");
         return true;
     }
 
@@ -327,6 +343,35 @@ public:
     }
 
 private:
+    // A function table that comes back from the runtime can be missing entries
+    // if the installed SteamVR is older than the header. Calling a null pointer
+    // would crash, so report the first missing function instead.
+    static bool checkOverlayTable(VR_IVROverlay_FnTable *t) {
+        struct Entry { const char *name; const void *fn; };
+        const Entry entries[] = {
+            {"CreateOverlay", reinterpret_cast<const void *>(t->CreateOverlay)},
+            {"SetOverlayWidthInMeters", reinterpret_cast<const void *>(t->SetOverlayWidthInMeters)},
+            {"SetOverlaySortOrder", reinterpret_cast<const void *>(t->SetOverlaySortOrder)},
+            {"SetOverlayFlag", reinterpret_cast<const void *>(t->SetOverlayFlag)},
+            {"SetOverlayTransformTrackedDeviceRelative",
+             reinterpret_cast<const void *>(t->SetOverlayTransformTrackedDeviceRelative)},
+            {"SetOverlayRaw", reinterpret_cast<const void *>(t->SetOverlayRaw)},
+            {"ShowOverlay", reinterpret_cast<const void *>(t->ShowOverlay)},
+            {"HideOverlay", reinterpret_cast<const void *>(t->HideOverlay)},
+            {"DestroyOverlay", reinterpret_cast<const void *>(t->DestroyOverlay)},
+            {"GetOverlayErrorNameFromEnum",
+             reinterpret_cast<const void *>(t->GetOverlayErrorNameFromEnum)},
+        };
+        for (const auto &e : entries) {
+            if (!e.fn) {
+                logger::error(std::string("The OpenVR overlay interface is missing ") +
+                              e.name + ". Update SteamVR and try again.");
+                return false;
+            }
+        }
+        return true;
+    }
+
     static double nowSeconds() {
         using clock = std::chrono::steady_clock;
         return std::chrono::duration<double>(clock::now().time_since_epoch()).count();
@@ -474,6 +519,23 @@ int runLive(const Options &opt) {
 
 }  // namespace
 
+#ifdef _WIN32
+namespace {
+
+LONG WINAPI crashHandler(EXCEPTION_POINTERS *info) {
+    char buf[256];
+    const DWORD code = info->ExceptionRecord->ExceptionCode;
+    const void *addr = info->ExceptionRecord->ExceptionAddress;
+    std::snprintf(buf, sizeof(buf),
+                  "CRASH: unhandled exception 0x%08lX at %p. Please report this.",
+                  static_cast<unsigned long>(code), addr);
+    logger::raw(buf);
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
+}  // namespace
+#endif
+
 int main(int argc, char **argv) {
     Options opt;
     if (!parseArgs(argc, argv, opt)) {
@@ -489,6 +551,9 @@ int main(int argc, char **argv) {
                   " hand=" + opt.hand + " fps=" + std::to_string(opt.fps) +
                   " poll=" + std::to_string(opt.pollInterval) + "s");
     }
+#ifdef _WIN32
+    SetUnhandledExceptionFilter(crashHandler);
+#endif
     int rc;
     if (!opt.preview.empty()) rc = runPreview(opt);
     else rc = runLive(opt);

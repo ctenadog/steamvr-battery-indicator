@@ -192,12 +192,103 @@ void testBatteryReading() {
     std::printf("battery reading OK\n");
 }
 
+// --- Fake IVROverlay function table ---------------------------------------
+
+int g_rawCalls = 0;
+uint32_t g_lastRawW = 0, g_lastRawH = 0, g_lastRawBpp = 0;
+VROverlayHandle_t g_lastHandle = k_ulOverlayHandleInvalid;
+
+VR_IVROverlay_FnTable makeFakeOverlay() {
+    VR_IVROverlay_FnTable t{};
+    t.CreateOverlay = [](char *key, char *name, VROverlayHandle_t *handle) -> EVROverlayError {
+        (void)key; (void)name;
+        if (handle) *handle = 7;  // any non-invalid handle
+        return EVROverlayError_VROverlayError_None;
+    };
+    t.FindOverlay = [](char *, VROverlayHandle_t *handle) -> EVROverlayError {
+        if (handle) *handle = 7;
+        return EVROverlayError_VROverlayError_None;
+    };
+    t.SetOverlayWidthInMeters = [](VROverlayHandle_t, float) -> EVROverlayError {
+        return EVROverlayError_VROverlayError_None;
+    };
+    t.SetOverlaySortOrder = [](VROverlayHandle_t, uint32_t) -> EVROverlayError {
+        return EVROverlayError_VROverlayError_None;
+    };
+    t.SetOverlayFlag = [](VROverlayHandle_t, VROverlayFlags, bool) -> EVROverlayError {
+        return EVROverlayError_VROverlayError_None;
+    };
+    t.SetOverlayTransformTrackedDeviceRelative =
+        [](VROverlayHandle_t, TrackedDeviceIndex_t, HmdMatrix34_t *) -> EVROverlayError {
+        return EVROverlayError_VROverlayError_None;
+    };
+    t.SetOverlayRaw = [](VROverlayHandle_t h, void *buf, uint32_t w, uint32_t height,
+                         uint32_t bpp) -> EVROverlayError {
+        ++g_rawCalls;
+        g_lastHandle = h;
+        g_lastRawW = w;
+        g_lastRawH = height;
+        g_lastRawBpp = bpp;
+        assert(buf != nullptr);
+        return EVROverlayError_VROverlayError_None;
+    };
+    t.ShowOverlay = [](VROverlayHandle_t) -> EVROverlayError {
+        return EVROverlayError_VROverlayError_None;
+    };
+    t.HideOverlay = [](VROverlayHandle_t) -> EVROverlayError {
+        return EVROverlayError_VROverlayError_None;
+    };
+    t.DestroyOverlay = [](VROverlayHandle_t) -> EVROverlayError {
+        return EVROverlayError_VROverlayError_None;
+    };
+    t.GetOverlayErrorNameFromEnum = [](EVROverlayError) -> char * {
+        return const_cast<char *>("VROverlayError_None");
+    };
+    return t;
+}
+
+// Exercises the exact code path that runs when the app starts up, with fake
+// OpenVR tables, so a crash in start() is caught without a headset.
+void testOverlayStartup() {
+    g_devices.clear();
+    g_devices.resize(64);
+    g_devices[0].connected = true;  // HMD with battery
+    g_devices[0].provides = true;
+    g_devices[0].hasPct = true;
+    g_devices[0].pct = 0.55f;
+    g_devices[1].connected = true;  // right controller (the anchor)
+    g_devices[1].cls = ETrackedDeviceClass_TrackedDeviceClass_Controller;
+    g_devices[1].role = ETrackedControllerRole_TrackedControllerRole_RightHand;
+
+    VR_IVRSystem_FnTable sys = makeFakeSystem();
+    VR_IVROverlay_FnTable ovl = makeFakeOverlay();
+    Runtime rt;
+    rt.system = &sys;
+    rt.overlay = &ovl;
+
+    Options opt;
+    OverlayApp app(opt);
+    assert(app.start(rt));
+    assert(g_rawCalls == 1);
+    assert(g_lastHandle == 7);
+    assert(g_lastRawW == static_cast<uint32_t>(indicator::kTexW));
+    assert(g_lastRawH == static_cast<uint32_t>(indicator::kTexH));
+    assert(g_lastRawBpp == 4);
+
+    // A few ticks must not crash and must keep the texture valid.
+    app.tick();
+    app.tick();
+    app.stop();
+    std::printf("overlay startup OK\n");
+}
+
 }  // namespace
 
 int main() {
     testTransform();
     testImageAndPng();
     testBatteryReading();
+    testOverlayStartup();
     std::printf("ALL TESTS PASSED\n");
     return 0;
 }

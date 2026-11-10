@@ -39,10 +39,16 @@ exit /b 1
 
 :run
 "%BIN%" %*
-if errorlevel 1 (
+REM A crash (e.g. 0xC0000005) reports a negative code, for which "errorlevel 1"
+REM is false; compare against 0 explicitly so the window always stays open.
+if not "%errorlevel%"=="0" (
     echo.
-    echo The indicator exited with an error. See steamvr_battery_indicator.log
+    echo The indicator exited with code %errorlevel%. See steamvr_battery_indicator.log
     echo in this folder for details. Press any key to close.
+    pause >nul
+) else (
+    echo.
+    echo The indicator closed. Press any key to close.
     pause >nul
 )
 endlocal

@@ -103,4 +103,15 @@ inline void info(const std::string &m) { write("INFO", m); }
 inline void warn(const std::string &m) { write("WARN", m); }
 inline void error(const std::string &m) { write("ERROR", m); }
 
+// Writes a pre-formatted line without allocating, safe to call from a crash
+// handler where the heap may be in an unknown state.
+inline void raw(const char *line) {
+    if (stream()) {
+        std::fputs(line, stream());
+        std::fputc('\n', stream());
+        std::fflush(stream());
+    }
+    std::fprintf(stderr, "%s\n", line);
+}
+
 }  // namespace logger
