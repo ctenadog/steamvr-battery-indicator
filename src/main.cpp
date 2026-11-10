@@ -13,6 +13,7 @@
 #include "runtime.h"
 #include "image.h"
 #include "indicator.h"
+#include "log.h"
 
 namespace {
 
@@ -30,6 +31,8 @@ struct Options {
     float pollInterval = 1.0f;
     std::string preview;           // path for a one-off PNG render
     bool list = false;
+    std::string logPath;           // empty = default next to the exe
+    bool noLog = false;            // disable the log file entirely
 };
 
 void printUsage(const char *prog) {
@@ -47,6 +50,8 @@ void printUsage(const char *prog) {
         "  --poll-interval SECONDS     seconds between battery readings (default: 1.0)\n"
         "  --preview PATH              render one frame to a PNG and exit (no SteamVR needed)\n"
         "  --list                      print tracked devices with their battery state and exit\n"
+        "  --log PATH                  write the log file to PATH (default: next to the exe)\n"
+        "  --no-log                    do not write a log file\n"
         "  -h, --help                  show this help\n",
         prog);
 }
@@ -115,6 +120,12 @@ bool parseArgs(int argc, char **argv, Options &opt) {
             opt.preview = v;
         } else if (arg == "--list") {
             opt.list = true;
+        } else if (arg == "--log") {
+            const char *v = value("--log");
+            if (!v) return false;
+            opt.logPath = v;
+        } else if (arg == "--no-log") {
+            opt.noLog = true;
         } else {
             std::fprintf(stderr, "Unknown option: %s\n", arg.c_str());
             return false;
@@ -184,6 +195,21 @@ BatteryReading readBattery(VR_IVRSystem_FnTable *system, uint32_t device) {
     }
     r.charging = chargingOk && charging;
     return r;
+}
+
+// Human-readable one-line summary of a reading, used for log lines.
+std::string describe(const BatteryReading &r) {
+    std::string s;
+    if (!r.available) return "unavailable";
+    if (r.hasPercentage) {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%d%%", static_cast<int>(std::lround(r.percentage * 100)));
+        s = buf;
+    } else {
+        s = "--";
+    }
+    s += r.charging ? " charging" : " discharging";
+    return s;
 }
 
 uint32_t findController(VR_IVRSystem_FnTable *system, const std::string &hand) {
@@ -281,6 +307,10 @@ public:
             reading_.percentage != lastPct_ || reading_.charging != lastCharging_ ||
             reading_.charging) {
             upload(static_cast<float>(now));
+            if (reading_.available != lastAvail_ || reading_.hasPercentage != lastHasPct_ ||
+                reading_.percentage != lastPct_ || reading_.charging != lastCharging_) {
+                logger::info("Battery " + describe(reading_));
+            }
             lastAvail_ = reading_.available;
             lastHasPct_ = reading_.hasPercentage;
             lastPct_ = reading_.percentage;
@@ -389,16 +419,24 @@ int runPreview(const Options &opt) {
 int runLive(const Options &opt) {
     Runtime rt;
     if (!rt.load()) {
+        logger::error("Could not load the OpenVR runtime library (libopenvr_api). "
+                   "Start SteamVR, or set STEAMVR_OPENVR_PATH to the library path.");
         std::fprintf(stderr,
                      "Could not load the OpenVR runtime library (libopenvr_api).\n"
                      "Start SteamVR, or set STEAMVR_OPENVR_PATH to the library path.\n");
         return 1;
     }
     if (!rt.isRuntimeInstalled()) {
+        logger::error("SteamVR runtime not found. Start SteamVR and try again.");
         std::fprintf(stderr, "SteamVR runtime not found. Start SteamVR and try again.\n");
         return 1;
     }
-    if (!rt.start(EVRApplicationType_VRApplication_Overlay)) return 1;
+    logger::info("OpenVR runtime loaded; initialising overlay application.");
+    if (!rt.start(EVRApplicationType_VRApplication_Overlay)) {
+        logger::error("OpenVR initialisation failed (see message above).");
+        return 1;
+    }
+    logger::info("OpenVR initialised.");
 
     if (opt.list) {
         describeDevices(rt.system);
@@ -408,9 +446,12 @@ int runLive(const Options &opt) {
 
     OverlayApp app(opt);
     if (!app.start(rt)) {
+        logger::error("Could not create the overlay.");
         rt.stop();
         return 1;
     }
+    logger::info("Overlay attached to " + opt.anchor + "/" + opt.hand +
+              ", source=" + opt.source + ".");
     std::printf("Overlay attached to %s/%s, source=%s. Press Ctrl+C to quit.\n",
                 opt.anchor.c_str(), opt.hand.c_str(), opt.source.c_str());
 
@@ -419,6 +460,7 @@ int runLive(const Options &opt) {
     for (;;) {
         while (rt.system->PollNextEvent(&event, sizeof(event))) {
             if (event.eventType == EVREventType_VREvent_Quit) {
+                logger::info("Quit event received; shutting down.");
                 rt.system->AcknowledgeQuit_Exiting();
                 app.stop();
                 rt.stop();
@@ -438,6 +480,19 @@ int main(int argc, char **argv) {
         printUsage(argv[0]);
         return 1;
     }
-    if (!opt.preview.empty()) return runPreview(opt);
-    return runLive(opt);
+    if (!opt.noLog) {
+        const bool ok = logger::open(opt.logPath);
+        logger::info(std::string("SteamVR battery indicator started. ") +
+                  (ok ? "Log file: " + (opt.logPath.empty() ? logger::defaultPath() : opt.logPath)
+                      : "Could not open the log file; logging to the console only."));
+        logger::info("Options: source=" + opt.source + " anchor=" + opt.anchor +
+                  " hand=" + opt.hand + " fps=" + std::to_string(opt.fps) +
+                  " poll=" + std::to_string(opt.pollInterval) + "s");
+    }
+    int rc;
+    if (!opt.preview.empty()) rc = runPreview(opt);
+    else rc = runLive(opt);
+    logger::info("Exiting with code " + std::to_string(rc) + ".");
+    logger::close();
+    return rc;
 }

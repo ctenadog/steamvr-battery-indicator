@@ -48,7 +48,9 @@
 
 #include <stdint.h>
 
-#if defined( __WIN32 )
+#if defined( __cplusplus )
+// C++ has a native bool; nothing to declare here.
+#elif defined( __WIN32 ) || defined( _WIN32 )
 typedef char bool;
 #else
 #include <stdbool.h>

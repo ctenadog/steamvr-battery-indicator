@@ -1,34 +1,48 @@
 @echo off
 REM One-click launcher for SteamVR Battery Indicator (Windows).
-REM Double-click this file to start. Builds on first run if a compiler is present.
+REM Double-click this file to start.
+REM
+REM The launcher prefers the prebuilt binary in dist\ (no compiler needed).
+REM If it is missing, it falls back to building from source with g++.
+
 setlocal
 cd /d "%~dp0"
 
-set "BIN=steamvr_battery_indicator.exe"
-if not exist "%BIN%" goto build
-goto run
+set "BIN=dist\steamvr_battery_indicator.exe"
+if exist "%BIN%" goto run
 
-:build
+REM No prebuilt binary: try to build one.
 where g++ >nul 2>&1
-if errorlevel 1 (
-    echo A C++ compiler ^(g++^) was not found, so the program cannot be built.
-    echo Install MinGW-w64 or build with CMake/MSVC, then run this file again.
-    pause
-    exit /b 1
-)
-echo Building with g++ ...
+if errorlevel 1 goto nocompiler
+
+echo No prebuilt binary found. Building from source with g++ ...
 g++ -std=c++17 -O2 -Isrc src\main.cpp -o "%BIN%"
 if errorlevel 1 (
     echo Build failed. Press any key to close.
     pause >nul
     exit /b 1
 )
+goto run
+
+:nocompiler
+echo.
+echo No prebuilt binary was found in dist\ and no C++ compiler (g++) is installed.
+echo.
+echo Options:
+echo   1. Get the prebuilt dist\steamvr_battery_indicator.exe from the repository
+echo      or the GitHub releases, place it in dist\, then run this file again.
+echo   2. Install MinGW-w64 (https://www.mingw-w64.org/) or build with
+echo      CMake/MSVC, then run this file again.
+echo.
+pause
+exit /b 1
 
 :run
 "%BIN%" %*
 if errorlevel 1 (
     echo.
-    echo The indicator exited with an error. Press any key to close.
+    echo The indicator exited with an error. See steamvr_battery_indicator.log
+    echo in this folder for details. Press any key to close.
     pause >nul
 )
 endlocal
